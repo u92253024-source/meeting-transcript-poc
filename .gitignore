@@ -1,0 +1,16 @@
+node_modules/
+dist-web/
+dist-server/
+dist-desktop/
+dist/
+data/
+.env
+.npm-cache/
+deliverables/
+release/
+reports/
+tmp/
+*.log
+/index-*.js
+/main.js
+/preload.js

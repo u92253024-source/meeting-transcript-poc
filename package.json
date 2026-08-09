@@ -1,0 +1,85 @@
+{
+  "name": "meeting-transcript-poc",
+  "version": "0.1.2",
+  "description": "Windows LAN meeting transcript host",
+  "author": "NCCUACA",
+  "private": true,
+  "type": "module",
+  "main": "dist-desktop/desktop/main.js",
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:web": "vite",
+    "build": "tsc -p tsconfig.server.json && vite build",
+    "build:desktop": "npm run build && tsc -p tsconfig.desktop.json",
+    "desktop": "npm run build:desktop && electron .",
+    "dist:win": "npm run build:desktop && electron-builder --win nsis portable",
+    "start": "node dist-server/server/index.js",
+    "smoke": "node scripts/smoke-test.mjs",
+    "replay": "node scripts/replay-audio.mjs",
+    "diarize": "node scripts/assembly-diarize-file.mjs",
+    "compare": "node scripts/compare-transcripts.mjs",
+    "deepgram:batch": "node scripts/deepgram-transcribe-file.mjs",
+    "compare:deepgram": "node scripts/compare-deepgram.mjs",
+    "diagnose:assembly": "node scripts/assembly-stream-diagnose.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/static": "^10.1.3",
+    "@google-cloud/speech": "^7.2.1",
+    "docx": "^9.7.1",
+    "dotenv": "^17.2.3",
+    "fastify": "^5.6.1",
+    "pdfkit": "^0.19.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "ws": "^8.18.3",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/pdfkit": "^0.17.6",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.1.1",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.2",
+    "vitest": "^4.0.8",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "tw.edu.nccu.meetingtranscript",
+    "productName": "中文會議逐字稿",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-desktop/**/*",
+      "dist-server/**/*",
+      "dist-web/**/*",
+      ".env.example",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}-${arch}.${ext}"
+    }
+  }
+}
