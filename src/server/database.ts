@@ -218,6 +218,14 @@ export class TranscriptDatabase {
     return Number(result.changes) === 1 ? this.getMeeting(id) : null;
   }
 
+  restoreAudioDeletion(id: string, deletedAt: string): boolean {
+    const result = this.db.prepare(`
+      UPDATE meetings SET audio_deleted_at = NULL
+      WHERE id = ? AND audio_deleted_at = ? AND postprocess_status NOT IN ('queued', 'processing')
+    `).run(id, deletedAt);
+    return Number(result.changes) === 1;
+  }
+
   deleteMeeting(id: string): boolean {
     const result = this.db.prepare("DELETE FROM meetings WHERE id = ? AND status = 'stopped'").run(id);
     return Number(result.changes) === 1;
@@ -245,7 +253,7 @@ export class TranscriptDatabase {
     this.db.prepare(`
       UPDATE meetings
       SET status = 'stopped', stopped_at = ?, audio_duration_ms = ?, estimated_cost_usd = ?
-      WHERE id = ?
+      WHERE id = ? AND status = 'recording'
     `).run(stoppedAt, audioDurationMs, estimatedCostUsd, id);
     return this.getMeeting(id);
   }
@@ -256,7 +264,8 @@ export class TranscriptDatabase {
       UPDATE meetings
       SET postprocess_status = 'queued', postprocess_requested_at = ?,
           postprocess_completed_at = NULL, postprocess_error = NULL, assembly_transcript_id = NULL
-      WHERE id = ? AND status = 'stopped' AND postprocess_status IN ('not_requested', 'failed')
+      WHERE id = ? AND status = 'stopped' AND audio_deleted_at IS NULL
+        AND postprocess_status IN ('not_requested', 'failed')
     `).run(requestedAt, id);
     return Number(result.changes) === 1 ? this.getMeeting(id) : null;
   }
@@ -370,6 +379,10 @@ export class TranscriptDatabase {
       FROM transcript_readable_variants variant
       JOIN transcript_segments segment ON segment.id = variant.segment_id
       WHERE variant.id = ? AND variant.meeting_id = ?
+        AND variant.version = (
+          SELECT MAX(latest.version) FROM transcript_readable_variants latest
+          WHERE latest.segment_id = variant.segment_id
+        )
     `).get(variantId, meetingId) as ReadableVariantRow | undefined;
     if (!row || this.hashText(row.current_text) !== row.source_text_hash) return null;
     if (status === "accepted") {
@@ -393,6 +406,23 @@ export class TranscriptDatabase {
         .map((variant) => [variant.segmentId, variant.text]),
     );
     return segments.map((segment) => ({ ...segment, text: accepted.get(segment.id) ?? segment.text }));
+  }
+
+  recoverInterruptedWork(): number {
+    const now = new Date().toISOString();
+    const postprocess = this.db.prepare(`
+      UPDATE meetings
+      SET postprocess_status = 'failed', postprocess_completed_at = ?,
+          postprocess_error = '服務重新啟動，前次會後講者修正未完成；重新送出前請確認供應商帳務'
+      WHERE postprocess_status IN ('queued', 'processing')
+    `).run(now);
+    const readable = this.db.prepare(`
+      UPDATE meetings
+      SET readable_status = 'failed', readable_completed_at = ?,
+          readable_error = '服務重新啟動，前次易讀版產生工作未完成，請重新執行'
+      WHERE readable_status = 'processing'
+    `).run(now);
+    return Number(postprocess.changes) + Number(readable.changes);
   }
 
   addSegment(input: Omit<TranscriptSegment, "id" | "createdAt" | "speakerId">): TranscriptSegment {

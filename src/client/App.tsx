@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { InterimTranscript, Meeting, MeetingSpeaker, ProviderStatus, ReadableVariant, ServerEvent, TranscriptSegment } from "../shared/types";
 import type { DesktopSettingsInput, DesktopSettingsSummary, DesktopTranscriptionMode } from "../shared/desktop-settings";
+import { encodeAdminCredential } from "../shared/admin-credential";
 
 declare global {
   interface Window {
@@ -156,7 +157,7 @@ export function App() {
     try {
       const response = await fetch("/api/meetings", {
         method: "POST",
-        headers: { "content-type": "application/json", "x-admin-password": adminPassword },
+        headers: { "content-type": "application/json", "x-admin-password-encoded": encodeAdminCredential(adminPassword) },
         body: JSON.stringify({ title }),
       });
       const payload = await response.json() as CreateResponse & { error?: string };
@@ -301,7 +302,7 @@ export function App() {
     try {
       const response = await fetch(`/api/meetings/${meeting.id}/stop`, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-admin-password": adminPassword },
+        headers: { "content-type": "application/json", "x-admin-password-encoded": encodeAdminCredential(adminPassword) },
         body: "{}",
       });
       const payload = await response.json() as { meeting?: Meeting; error?: string };
@@ -329,7 +330,7 @@ export function App() {
     try {
       const response = await fetch(`/api/meetings/${meeting.id}/postprocess`, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-admin-password": adminPassword },
+        headers: { "content-type": "application/json", "x-admin-password-encoded": encodeAdminCredential(adminPassword) },
         body: "{}",
       });
       const payload = await response.json() as { meeting?: Meeting; error?: string };
@@ -350,7 +351,7 @@ export function App() {
     try {
       const response = await fetch(`/api/meetings/${meeting.id}/audio`, {
         method: "DELETE",
-        headers: { "x-admin-password": adminPassword },
+        headers: { "x-admin-password-encoded": encodeAdminCredential(adminPassword) },
       });
       const payload = await response.json() as { meeting?: Meeting; error?: string };
       if (!response.ok || !payload.meeting) throw new Error(payload.error ?? "無法刪除錄音");
@@ -370,7 +371,7 @@ export function App() {
     try {
       const response = await fetch(`/api/meetings/${meeting.id}`, {
         method: "DELETE",
-        headers: { "x-admin-password": adminPassword },
+        headers: { "x-admin-password-encoded": encodeAdminCredential(adminPassword) },
       });
       const payload = await response.json() as { deleted?: boolean; error?: string };
       if (!response.ok || !payload.deleted) throw new Error(payload.error ?? "無法刪除會議");
@@ -402,7 +403,7 @@ export function App() {
     try {
       const response = await fetch(`/api/meetings/${meeting.id}/readable`, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-admin-password": adminPassword },
+        headers: { "content-type": "application/json", "x-admin-password-encoded": encodeAdminCredential(adminPassword) },
         body: "{}",
       });
       const payload = await response.json() as { meeting?: Meeting; error?: string };
@@ -421,7 +422,7 @@ export function App() {
     try {
       const response = await fetch(`/api/meetings/${meeting.id}/readable/${variant.id}`, {
         method: "PATCH",
-        headers: { "content-type": "application/json", "x-admin-password": adminPassword },
+        headers: { "content-type": "application/json", "x-admin-password-encoded": encodeAdminCredential(adminPassword) },
         body: JSON.stringify({ status }),
       });
       const payload = await response.json() as { variants?: ReadableVariant[]; error?: string };
@@ -453,7 +454,7 @@ export function App() {
     try {
       const response = await fetch(`/api/meetings/${meeting.id}/segments/${segmentId}`, {
         method: "PATCH",
-        headers: { "content-type": "application/json", "x-admin-password": adminPassword },
+        headers: { "content-type": "application/json", "x-admin-password-encoded": encodeAdminCredential(adminPassword) },
         body: JSON.stringify({ text: editingText }),
       });
       const payload = await response.json() as { segment?: TranscriptSegment; error?: string };
@@ -475,7 +476,7 @@ export function App() {
     try {
       const response = await fetch(`/api/meetings/${meeting.id}/speakers/${speaker.id}`, {
         method: "PATCH",
-        headers: { "content-type": "application/json", "x-admin-password": adminPassword },
+        headers: { "content-type": "application/json", "x-admin-password-encoded": encodeAdminCredential(adminPassword) },
         body: JSON.stringify({ name: newName }),
       });
       const payload = await response.json() as { segments?: TranscriptSegment[]; speakers?: MeetingSpeaker[]; error?: string };
@@ -496,7 +497,7 @@ export function App() {
     try {
       const response = await fetch(`/api/meetings/${meeting.id}/speakers`, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-admin-password": adminPassword },
+        headers: { "content-type": "application/json", "x-admin-password-encoded": encodeAdminCredential(adminPassword) },
         body: JSON.stringify({ name: newSpeakerName }),
       });
       const payload = await response.json() as { speakers?: MeetingSpeaker[]; error?: string };
@@ -519,7 +520,7 @@ export function App() {
     try {
       const response = await fetch(`/api/meetings/${meeting.id}/speakers/${source.id}/merge`, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-admin-password": adminPassword },
+        headers: { "content-type": "application/json", "x-admin-password-encoded": encodeAdminCredential(adminPassword) },
         body: JSON.stringify({ targetSpeakerId }),
       });
       const payload = await response.json() as { segments?: TranscriptSegment[]; speakers?: MeetingSpeaker[]; error?: string };
@@ -540,7 +541,7 @@ export function App() {
     try {
       const response = await fetch(`/api/meetings/${meeting.id}/segments/${segmentId}/speaker`, {
         method: "PATCH",
-        headers: { "content-type": "application/json", "x-admin-password": adminPassword },
+        headers: { "content-type": "application/json", "x-admin-password-encoded": encodeAdminCredential(adminPassword) },
         body: JSON.stringify({ speakerId }),
       });
       const payload = await response.json() as { segment?: TranscriptSegment; error?: string };

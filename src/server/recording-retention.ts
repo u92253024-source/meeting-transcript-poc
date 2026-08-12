@@ -8,8 +8,15 @@ export async function deleteMeetingAudio(
   meetingId: string,
 ): Promise<boolean> {
   const audioDirectory = getAudioDirectory(dataDir, meetingId);
-  await fs.rm(audioDirectory, { recursive: true, force: true });
-  return Boolean(database.markAudioDeleted(meetingId));
+  const marked = database.markAudioDeleted(meetingId);
+  if (!marked?.recording.audioDeletedAt) return false;
+  try {
+    await fs.rm(audioDirectory, { recursive: true, force: true });
+    return true;
+  } catch (error) {
+    database.restoreAudioDeletion(meetingId, marked.recording.audioDeletedAt);
+    throw error;
+  }
 }
 
 export async function cleanupExpiredRecordings(

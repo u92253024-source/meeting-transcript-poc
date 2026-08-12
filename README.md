@@ -22,20 +22,20 @@
 
 ```powershell
 Copy-Item .env.example .env
-npm install
+npm ci
 npm run dev
 ```
 
 在 Windows 主機開啟 `http://localhost:5173`。同一區域網路的其他裝置可開啟 `http://<主機區網 IP>:5173`，輸入會議 ID 與觀看碼。
 
-首次啟動會在網頁中設定至少 12 字元的管理密碼；每場新會議會自動產生獨立的 8 碼觀看碼。
+首次啟動必須從 Windows 主機本機的網頁設定至少 12 字元的管理密碼；區域網路裝置不能搶先完成初始設定。每場新會議會自動產生獨立的 8 碼觀看碼。
 
 production build 可用 `npm run build` 驗證。伺服器啟動後，可另開終端執行 `npm run smoke`，它會建立一場 mock 會議、透過 WebSocket 傳送兩秒 PCM、確認收到字幕後停止會議。
 
 ### Windows 桌面程式與安裝包
 
 ```powershell
-npm install
+npm ci
 npm run dist:win
 ```
 
@@ -138,4 +138,4 @@ USB 麥克風
 
 ## 安全界線
 
-管理密碼會以雜湊保存在本機 SQLite；觀看碼則為每場會議獨立產生。系統尚未提供登入嘗試鎖定、TLS 或企業身分驗證，仍只應在受信任的區域網路測試，不可直接暴露到網際網路。
+管理密碼會以雜湊保存在本機 SQLite；觀看碼則為每場會議獨立產生。同一來源連續 5 次輸入錯誤管理密碼後會暫停嘗試 60 秒。系統尚未提供 TLS 或企業身分驗證，仍只應在受信任的區域網路測試，不可直接暴露到網際網路。

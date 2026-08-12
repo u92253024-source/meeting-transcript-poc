@@ -11,6 +11,7 @@ import {
   type DesktopSettingsSummary,
   type DesktopTranscriptionMode,
 } from "../shared/desktop-settings.js";
+import { encodeAdminCredential } from "../shared/admin-credential.js";
 
 interface StoredDesktopSettings {
   transcriptionMode?: DesktopTranscriptionMode;
@@ -175,9 +176,12 @@ async function verifyAdminPassword(password: string): Promise<void> {
   if (!serverUrl) throw new Error("本機服務尚未啟動");
   const response = await fetch(`${serverUrl}/api/admin/verify`, {
     method: "POST",
-    headers: { "x-admin-password": password },
+    headers: { "x-admin-password-encoded": encodeAdminCredential(password) },
   });
-  if (!response.ok) throw new Error("管理密碼錯誤，無法變更 API 設定");
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { error?: string } | null;
+    throw new Error(payload?.error ?? `管理密碼驗證失敗（HTTP ${response.status}）`);
+  }
 }
 
 ipcMain.handle("desktop-settings:get", async (): Promise<DesktopSettingsSummary> => toSummary(await readStoredSettings()));

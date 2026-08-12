@@ -2,11 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomInt } from "node:crypto";
 import { networkInterfaces, type NetworkInterfaceInfo } from "node:os";
-import Fastify from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { z } from "zod";
 import type { ProviderStatus, ServerEvent } from "../shared/types.js";
+import { decodeAdminCredential } from "../shared/admin-credential.js";
 import { config } from "./config.js";
 import { TranscriptDatabase } from "./database.js";
 import { SpeakerTimeline } from "./alignment.js";
@@ -18,17 +19,25 @@ import { mergeMeetingWavChunks } from "./postprocess/merge-wav.js";
 import { generateTranscriptExport, type TranscriptExportFormat } from "./export/transcript-export.js";
 import { generateReadableCandidates } from "./readable/gemini-readable.js";
 import { AdminAuth } from "./admin-auth.js";
+import { AdminRateLimiter } from "./admin-rate-limit.js";
 import { cleanupExpiredRecordings, deleteMeetingAudio, deleteMeetingData } from "./recording-retention.js";
+import { isLoopbackAddress } from "./request-security.js";
 
-const app = Fastify({ logger: true, bodyLimit: 1_048_576 });
+const app = Fastify({
+  logger: { redact: ["req.url"] },
+  bodyLimit: 1_048_576,
+});
 const database = new TranscriptDatabase(config.dataDir);
 database.backfillLegacyViewerCodes(config.legacyViewAccessCode);
+const recoveredJobs = database.recoverInterruptedWork();
+if (recoveredJobs > 0) app.log.warn({ jobs: recoveredJobs }, "Interrupted background jobs marked for retry");
 const adminAuth = new AdminAuth(database, config.bootstrapAdminPassword);
+const adminRateLimiter = new AdminRateLimiter();
 const sockets = new Map<string, Set<WebSocket>>();
 const sessions = new Map<string, MeetingSession>();
 const hostTokens = new Map<string, string>();
 const audioPreparations = new Map<string, Promise<string>>();
-const webSocketServer = new WebSocketServer({ noServer: true });
+const webSocketServer = new WebSocketServer({ noServer: true, maxPayload: 64 * 1_024 });
 
 const meetingInput = z.object({
   title: z.string().trim().min(1).max(120).default("未命名會議"),
@@ -41,9 +50,38 @@ const exportFormatInput = z.enum(["txt", "md", "docx", "pdf"]);
 const readableReviewInput = z.object({ status: z.enum(["accepted", "rejected"]) });
 const initialAdminPasswordInput = z.object({ password: z.string().min(12).max(256) });
 
-function isAdmin(password: string | string[] | undefined): boolean {
-  return adminAuth.verify(password);
+function requireAdmin(request: FastifyRequest, reply: FastifyReply): boolean {
+  const decision = adminRateLimiter.check(request.ip);
+  if (!decision.allowed) {
+    reply.header("retry-after", String(decision.retryAfterSeconds)).code(429).send({ error: "管理密碼嘗試次數過多，請稍後再試" });
+    return false;
+  }
+  const encodedPassword = decodeAdminCredential(request.headers["x-admin-password-encoded"]);
+  const password = encodedPassword ?? request.headers["x-admin-password"];
+  if (adminAuth.verify(password)) {
+    adminRateLimiter.recordSuccess(request.ip);
+    return true;
+  }
+  adminRateLimiter.recordFailure(request.ip);
+  reply.code(401).send({ error: "管理密碼錯誤" });
+  return false;
 }
+
+app.setErrorHandler((error, request, reply) => {
+  if (error instanceof z.ZodError) {
+    return reply.code(400).send({
+      error: "請求格式錯誤",
+      issues: error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })),
+    });
+  }
+  const candidateStatus = typeof error === "object" && error && "statusCode" in error
+    ? Number(error.statusCode)
+    : 500;
+  const statusCode = candidateStatus >= 400 && candidateStatus < 500 ? candidateStatus : 500;
+  const message = error instanceof Error ? error.message : String(error);
+  if (statusCode === 500) request.log.error(error);
+  return reply.code(statusCode).send({ error: statusCode === 500 ? "伺服器處理請求失敗" : message });
+});
 
 function createViewerCode(): string {
   const alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -85,21 +123,20 @@ app.get("/api/setup-status", async () => ({ adminPasswordConfigured: adminAuth.i
 // Electron uses this endpoint before it accepts a change to its encrypted
 // provider settings.  It deliberately returns no secret or account details.
 app.post("/api/admin/verify", async (request, reply) => {
-  if (!isAdmin(request.headers["x-admin-password"])) {
-    return reply.code(401).send({ error: "管理密碼錯誤" });
-  }
+  if (!requireAdmin(request, reply)) return;
   return { ok: true };
 });
 
 app.post("/api/setup/admin-password", async (request, reply) => {
   if (adminAuth.isConfigured) return reply.code(409).send({ error: "管理密碼已設定；請在管理介面變更" });
+  if (!isLoopbackAddress(request.ip)) return reply.code(403).send({ error: "管理密碼只能從主機本機首次設定" });
   const input = initialAdminPasswordInput.parse(request.body ?? {});
   adminAuth.configure(input.password);
   return reply.code(201).send({ adminPasswordConfigured: true });
 });
 
 app.post("/api/meetings", async (request, reply) => {
-  if (!isAdmin(request.headers["x-admin-password"])) return reply.code(401).send({ error: "管理密碼錯誤" });
+  if (!requireAdmin(request, reply)) return;
   const input = meetingInput.parse(request.body ?? {});
   const accessCode = createViewerCode();
   const meeting = database.createMeeting(input.title, accessCode);
@@ -181,7 +218,7 @@ app.get("/api/meetings/:id/export/:format", async (request, reply) => {
 });
 
 app.delete("/api/meetings/:id/audio", async (request, reply) => {
-  if (!isAdmin(request.headers["x-admin-password"])) return reply.code(401).send({ error: "管理密碼錯誤" });
+  if (!requireAdmin(request, reply)) return;
   const { id } = request.params as { id: string };
   const meeting = database.getMeeting(id);
   if (!meeting) return reply.code(404).send({ error: "找不到會議" });
@@ -198,7 +235,7 @@ app.delete("/api/meetings/:id/audio", async (request, reply) => {
 });
 
 app.delete("/api/meetings/:id", async (request, reply) => {
-  if (!isAdmin(request.headers["x-admin-password"])) return reply.code(401).send({ error: "管理密碼錯誤" });
+  if (!requireAdmin(request, reply)) return;
   const { id } = request.params as { id: string };
   const meeting = database.getMeeting(id);
   if (!meeting) return reply.code(404).send({ error: "找不到會議" });
@@ -216,7 +253,7 @@ app.delete("/api/meetings/:id", async (request, reply) => {
 });
 
 app.post("/api/meetings/:id/readable", async (request, reply) => {
-  if (!isAdmin(request.headers["x-admin-password"])) return reply.code(401).send({ error: "管理密碼錯誤" });
+  if (!requireAdmin(request, reply)) return;
   const { id } = request.params as { id: string };
   const meeting = database.getMeeting(id);
   if (!meeting) return reply.code(404).send({ error: "找不到會議" });
@@ -233,7 +270,7 @@ app.post("/api/meetings/:id/readable", async (request, reply) => {
 });
 
 app.patch("/api/meetings/:id/readable/:variantId", async (request, reply) => {
-  if (!isAdmin(request.headers["x-admin-password"])) return reply.code(401).send({ error: "管理密碼錯誤" });
+  if (!requireAdmin(request, reply)) return;
   const { id, variantId } = request.params as { id: string; variantId: string };
   const meeting = database.getMeeting(id);
   if (!meeting) return reply.code(404).send({ error: "找不到此會議" });
@@ -247,7 +284,7 @@ app.patch("/api/meetings/:id/readable/:variantId", async (request, reply) => {
 });
 
 app.patch("/api/meetings/:id/segments/:segmentId", async (request, reply) => {
-  if (!isAdmin(request.headers["x-admin-password"])) return reply.code(401).send({ error: "管理密碼錯誤" });
+  if (!requireAdmin(request, reply)) return;
   const { id, segmentId } = request.params as { id: string; segmentId: string };
   const meeting = database.getMeeting(id);
   if (!meeting) return reply.code(404).send({ error: "找不到會議" });
@@ -260,7 +297,7 @@ app.patch("/api/meetings/:id/segments/:segmentId", async (request, reply) => {
 });
 
 app.patch("/api/meetings/:id/segments/:segmentId/speaker", async (request, reply) => {
-  if (!isAdmin(request.headers["x-admin-password"])) return reply.code(401).send({ error: "管理密碼錯誤" });
+  if (!requireAdmin(request, reply)) return;
   const { id, segmentId } = request.params as { id: string; segmentId: string };
   const meeting = database.getMeeting(id);
   if (!meeting) return reply.code(404).send({ error: "找不到會議" });
@@ -273,7 +310,7 @@ app.patch("/api/meetings/:id/segments/:segmentId/speaker", async (request, reply
 });
 
 app.post("/api/meetings/:id/speakers", async (request, reply) => {
-  if (!isAdmin(request.headers["x-admin-password"])) return reply.code(401).send({ error: "管理密碼錯誤" });
+  if (!requireAdmin(request, reply)) return;
   const { id } = request.params as { id: string };
   const meeting = database.getMeeting(id);
   if (!meeting) return reply.code(404).send({ error: "找不到會議" });
@@ -286,7 +323,7 @@ app.post("/api/meetings/:id/speakers", async (request, reply) => {
 });
 
 app.patch("/api/meetings/:id/speakers/:speakerId", async (request, reply) => {
-  if (!isAdmin(request.headers["x-admin-password"])) return reply.code(401).send({ error: "管理密碼錯誤" });
+  if (!requireAdmin(request, reply)) return;
   const { id, speakerId } = request.params as { id: string; speakerId: string };
   const meeting = database.getMeeting(id);
   if (!meeting) return reply.code(404).send({ error: "找不到會議" });
@@ -304,7 +341,7 @@ app.patch("/api/meetings/:id/speakers/:speakerId", async (request, reply) => {
 });
 
 app.post("/api/meetings/:id/speakers/:speakerId/merge", async (request, reply) => {
-  if (!isAdmin(request.headers["x-admin-password"])) return reply.code(401).send({ error: "管理密碼錯誤" });
+  if (!requireAdmin(request, reply)) return;
   const { id, speakerId } = request.params as { id: string; speakerId: string };
   const meeting = database.getMeeting(id);
   if (!meeting) return reply.code(404).send({ error: "找不到會議" });
@@ -319,10 +356,11 @@ app.post("/api/meetings/:id/speakers/:speakerId/merge", async (request, reply) =
 });
 
 app.post("/api/meetings/:id/stop", async (request, reply) => {
-  if (!isAdmin(request.headers["x-admin-password"])) return reply.code(401).send({ error: "管理密碼錯誤" });
+  if (!requireAdmin(request, reply)) return;
   const { id } = request.params as { id: string };
   const meeting = database.getMeeting(id);
   if (!meeting) return reply.code(404).send({ error: "找不到會議" });
+  if (meeting.status === "stopped") return { meeting };
   const session = sessions.get(id);
   const audioDurationMs = session ? await session.stop() : meeting.postprocess.audioDurationMs;
   sessions.delete(id);
@@ -339,7 +377,7 @@ app.post("/api/meetings/:id/stop", async (request, reply) => {
 });
 
 app.post("/api/meetings/:id/postprocess", async (request, reply) => {
-  if (!isAdmin(request.headers["x-admin-password"])) return reply.code(401).send({ error: "管理密碼錯誤" });
+  if (!requireAdmin(request, reply)) return;
   const { id } = request.params as { id: string };
   const meeting = database.getMeeting(id);
   if (!meeting) return reply.code(404).send({ error: "找不到會議" });

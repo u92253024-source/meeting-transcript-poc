@@ -35,6 +35,52 @@ describe("post-meeting paid processing gate", () => {
     database.close();
   });
 
+  it("keeps the original stop time when stop is requested more than once", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "meeting-db-"));
+    temporaryDirectories.push(directory);
+    const database = new TranscriptDatabase(directory);
+    const meeting = database.createMeeting("重複停止");
+    const firstStop = database.stopMeeting(meeting.id, 1_000, 0)!;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const secondStop = database.stopMeeting(meeting.id, 9_999, 9)!;
+
+    expect(secondStop.stoppedAt).toBe(firstStop.stoppedAt);
+    expect(secondStop.postprocess.audioDurationMs).toBe(1_000);
+    expect(secondStop.postprocess.estimatedCostUsd).toBe(0);
+    database.close();
+  });
+
+  it("does not queue paid processing after audio deletion", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "meeting-db-"));
+    temporaryDirectories.push(directory);
+    const database = new TranscriptDatabase(directory);
+    const meeting = database.createMeeting("已刪除錄音");
+    database.stopMeeting(meeting.id, 3_600_000, 0.23);
+
+    expect(database.markAudioDeleted(meeting.id)?.recording.audioDeletedAt).toBeTruthy();
+    expect(database.queuePostprocess(meeting.id)).toBeNull();
+    database.close();
+  });
+
+  it("recovers interrupted background jobs into retryable failures", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "meeting-db-"));
+    temporaryDirectories.push(directory);
+    const database = new TranscriptDatabase(directory);
+    const meeting = database.createMeeting("中斷工作");
+    const segment = database.addSegment({ meetingId: meeting.id, startMs: 0, endMs: 1_000, text: "測試", speaker: "講者 1", speakerConfidence: null });
+    database.stopMeeting(meeting.id, 1_000, 0);
+    database.queuePostprocess(meeting.id);
+    database.markPostprocessProcessing(meeting.id);
+    database.beginReadableGeneration(meeting.id, segment.text.length, "gemini-3.5-flash-lite");
+
+    expect(database.recoverInterruptedWork()).toBe(2);
+    expect(database.getMeeting(meeting.id)).toMatchObject({
+      postprocess: { status: "failed" },
+      readable: { status: "failed" },
+    });
+    database.close();
+  });
+
   it("saves text corrections and renames a speaker across the meeting", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "meeting-db-"));
     temporaryDirectories.push(directory);
@@ -98,6 +144,26 @@ describe("post-meeting paid processing gate", () => {
     database.updateSegmentText(meeting.id, segment.id, "今天召開會議。");
     expect(database.listReadableVariants(meeting.id)[0].isStale).toBe(true);
     expect(database.listReadableSegments(meeting.id)[0].text).toBe("今天召開會議。");
+    database.close();
+  });
+
+  it("rejects review requests for superseded readable variants without changing the latest", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "meeting-db-"));
+    temporaryDirectories.push(directory);
+    const database = new TranscriptDatabase(directory);
+    const meeting = database.createMeeting("候選版本測試");
+    const segment = database.addSegment({ meetingId: meeting.id, startMs: 0, endMs: 1_000, text: "嗯，原文。", speaker: "講者 1", speakerConfidence: null });
+    database.stopMeeting(meeting.id, 1_000, 0);
+    const [oldVariant] = database.saveReadableVariants(meeting.id, "gemini-3.5-flash-lite", [
+      { segmentId: segment.id, sourceText: segment.text, text: "舊候選。" },
+    ]);
+    const [latestVariant] = database.saveReadableVariants(meeting.id, "gemini-3.5-flash-lite", [
+      { segmentId: segment.id, sourceText: segment.text, text: "新候選。" },
+    ]);
+
+    expect(database.reviewReadableVariant(meeting.id, oldVariant.id, "accepted")).toBeNull();
+    expect(database.reviewReadableVariant(meeting.id, latestVariant.id, "accepted")?.status).toBe("accepted");
+    expect(database.listReadableSegments(meeting.id)[0].text).toBe("新候選。");
     database.close();
   });
 });
