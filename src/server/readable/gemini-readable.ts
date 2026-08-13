@@ -20,6 +20,34 @@ const responseSchema = z.array(z.object({
   text: z.string().trim().min(1),
 }));
 
+const jsonSchema = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      segmentId: { type: "string" },
+      text: { type: "string" },
+    },
+    required: ["segmentId", "text"],
+  },
+} as const;
+
+// 新版 Gemini API 的結構化輸出欄位
+const modernGenerationConfig = {
+  responseFormat: {
+    text: {
+      mimeType: "application/json",
+      schema: jsonSchema,
+    },
+  },
+};
+
+// 舊版欄位；部分模型仍只接受這組
+const legacyGenerationConfig = {
+  responseMimeType: "application/json",
+  responseSchema: jsonSchema,
+};
+
 export async function generateReadableCandidates(options: GenerateReadableOptions): Promise<ReadableCandidate[]> {
   if (!options.apiKey) throw new Error("GEMINI_API_KEY 尚未設定");
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -38,34 +66,25 @@ export async function generateReadableCandidates(options: GenerateReadableOption
       "每個 segmentId 必須原樣回傳且只出現一次。若無法確定是否可刪，保留原文。",
       JSON.stringify(payload),
     ].join("\n");
-    const response = await fetchImpl(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(options.model)}:generateContent`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-goog-api-key": options.apiKey },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          generationConfig: {
-            responseFormat: {
-              text: {
-                mimeType: "application/json",
-                schema: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      segmentId: { type: "string" },
-                      text: { type: "string" },
-                    },
-                    required: ["segmentId", "text"],
-                  },
-                },
-              },
-            },
-          },
-        }),
-      },
-    );
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(options.model)}:generateContent`;
+    const send = (generationConfig: unknown) => fetchImpl(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": options.apiKey },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig,
+      }),
+    });
+
+    let response = await send(modernGenerationConfig);
+    // 部分模型只接受舊版 responseMimeType / responseSchema，遇到 400 時改用舊欄位重試一次
+    if (response.status === 400) {
+      const firstError = (await response.text()).slice(0, 500);
+      response = await send(legacyGenerationConfig);
+      if (!response.ok) {
+        throw new Error(`Gemini 易讀化失敗 (${response.status})：新版欄位 → ${firstError}；舊版欄位 → ${(await response.text()).slice(0, 500)}`);
+      }
+    }
     if (!response.ok) throw new Error(`Gemini 易讀化失敗 (${response.status})：${(await response.text()).slice(0, 500)}`);
     const body = await response.json() as {
       candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>;
