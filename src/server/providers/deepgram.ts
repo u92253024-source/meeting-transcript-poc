@@ -7,9 +7,14 @@ interface DeepgramOptions {
   language: string;
   keyterms: string[];
   diarization?: boolean;
+  utteranceEndMs: number;
+  maxSegmentMs: number;
+  maxSegmentCharacters: number;
 }
 
 interface DeepgramWord {
+  word?: string;
+  punctuated_word?: string;
   start?: number;
   end?: number;
   speaker?: number;
@@ -31,12 +36,22 @@ interface DeepgramResults {
   };
 }
 
+interface FinalRun {
+  startMs: number;
+  endMs: number;
+  text: string;
+  speaker: number | null;
+  boundaryBefore?: FlushReason;
+}
+
+type FlushReason = "speech_final" | "utterance_end" | "speaker_change" | "hard_limit" | "stream_end";
+
 export class DeepgramProvider implements AudioProvider {
   readonly name = "deepgram-nova-3";
   private socket: WebSocket | null = null;
   private queued: Buffer[] = [];
   private readonly speakerMap = new Map<number, string>();
-  private pendingFinal: { startMs: number; endMs: number; text: string } | null = null;
+  private pendingFinal: FinalRun | null = null;
 
   constructor(
     private readonly options: DeepgramOptions,
@@ -56,6 +71,8 @@ export class DeepgramProvider implements AudioProvider {
       punctuate: "true",
       utterances: "true",
       endpointing: "800",
+      utterance_end_ms: String(this.options.utteranceEndMs),
+      vad_events: "true",
     });
     if (this.options.diarization !== false) query.set("diarize_model", "latest");
     for (const keyterm of this.options.keyterms) query.append("keyterm", keyterm);
@@ -92,7 +109,7 @@ export class DeepgramProvider implements AudioProvider {
         resolve();
       }, 5_000).unref();
     });
-    this.flushPending();
+    this.flushPending("stream_end");
     this.socket = null;
   }
 
@@ -101,6 +118,10 @@ export class DeepgramProvider implements AudioProvider {
     try {
       message = JSON.parse(raw) as DeepgramResults;
     } catch {
+      return;
+    }
+    if (message.type === "UtteranceEnd") {
+      this.flushPending("utterance_end");
       return;
     }
     if (message.type !== "Results") return;
@@ -117,14 +138,12 @@ export class DeepgramProvider implements AudioProvider {
     const startMs = wordStarts.length ? Math.round(Math.min(...wordStarts) * 1000) : fallbackStart;
     const endMs = wordEnds.length ? Math.round(Math.max(...wordEnds) * 1000) : fallbackEnd;
     if (message.is_final) {
-      if (!this.pendingFinal) {
-        this.pendingFinal = { startMs, endMs, text };
-      } else {
-        this.pendingFinal.endMs = Math.max(this.pendingFinal.endMs, endMs);
-        this.pendingFinal.text = this.joinTranscript(this.pendingFinal.text, text);
+      const runs = this.createFinalRuns(text, words, startMs, endMs);
+      for (const run of runs) this.appendFinal(run);
+      if (message.speech_final || message.from_finalize) this.flushPending("speech_final");
+      else if (this.pendingFinal) {
+        this.emitInterim(this.pendingFinal.startMs, this.pendingFinal.endMs, this.pendingFinal.text);
       }
-      if (message.speech_final || message.from_finalize) this.flushPending();
-      else this.emitInterim(this.pendingFinal.startMs, this.pendingFinal.endMs, this.pendingFinal.text);
       return;
     }
 
@@ -136,12 +155,42 @@ export class DeepgramProvider implements AudioProvider {
     this.callbacks.onText?.({ startMs, endMs: Math.max(startMs + 1, endMs), text, isFinal: false });
   }
 
-  private flushPending(): void {
+  private appendFinal(run: FinalRun): void {
+    const pending = this.pendingFinal;
+    if (pending) {
+      const speakerChanged = pending.speaker !== null && run.speaker !== null && pending.speaker !== run.speaker;
+      const wordGapMs = run.startMs - pending.endMs;
+      const exceedsDuration = Math.max(pending.endMs, run.endMs) - pending.startMs > this.options.maxSegmentMs;
+      const exceedsCharacters = pending.text.length + run.text.length > this.options.maxSegmentCharacters;
+      if (run.boundaryBefore) this.flushPending(run.boundaryBefore);
+      else if (speakerChanged) this.flushPending("speaker_change");
+      else if (wordGapMs >= this.options.utteranceEndMs) this.flushPending("utterance_end");
+      else if (this.hasSentenceEndingPunctuation(pending.text)) this.flushPending("speech_final");
+      else if (exceedsDuration || exceedsCharacters) this.flushPending("hard_limit");
+    }
+
+    if (!this.pendingFinal) {
+      this.pendingFinal = { ...run };
+    } else {
+      this.pendingFinal.endMs = Math.max(this.pendingFinal.endMs, run.endMs);
+      this.pendingFinal.text = this.joinTranscript(this.pendingFinal.text, run.text);
+      this.pendingFinal.speaker ??= run.speaker;
+    }
+
+    if (
+      this.pendingFinal.endMs - this.pendingFinal.startMs >= this.options.maxSegmentMs
+      || this.pendingFinal.text.length >= this.options.maxSegmentCharacters
+    ) {
+      this.flushPending("hard_limit");
+    }
+  }
+
+  private flushPending(reason: FlushReason): void {
     if (!this.pendingFinal) return;
     this.callbacks.onText?.({
       startMs: this.pendingFinal.startMs,
       endMs: Math.max(this.pendingFinal.startMs + 1, this.pendingFinal.endMs),
-      text: this.pendingFinal.text,
+      text: this.ensureTerminalPunctuation(this.pendingFinal.text, reason),
       isFinal: true,
     });
     this.pendingFinal = null;
@@ -150,8 +199,122 @@ export class DeepgramProvider implements AudioProvider {
   private joinTranscript(left: string, right: string): string {
     if (!left) return right;
     if (!right) return left;
-    const needsSpace = /[A-Za-z0-9]$/.test(left) && /^[A-Za-z0-9]/.test(right);
+    const leftWord = [...left].reverse().find((character) => /[\p{L}\p{N}]/u.test(character));
+    const rightWord = [...right].find((character) => /[\p{L}\p{N}]/u.test(character));
+    const rightStartsWithClosingPunctuation = /^[，。！？；：、,.!?;:%）】〉」』]/u.test(right);
+    const needsSpace = Boolean(
+      leftWord && rightWord
+      && /[A-Za-z0-9]/.test(leftWord)
+      && /[A-Za-z0-9]/.test(rightWord)
+      && !rightStartsWithClosingPunctuation,
+    );
     return `${left}${needsSpace ? " " : ""}${right}`;
+  }
+
+  private createFinalRuns(text: string, words: DeepgramWord[], fallbackStartMs: number, fallbackEndMs: number): FinalRun[] {
+    const usableWords = words.flatMap((word) => {
+      const token = (word.punctuated_word ?? word.word ?? "").trim();
+      if (!token || typeof word.start !== "number" || typeof word.end !== "number") return [];
+      return [{
+        token,
+        startMs: Math.round(word.start * 1000),
+        endMs: Math.round(word.end * 1000),
+        speaker: this.options.diarization === false || typeof word.speaker !== "number" ? null : word.speaker,
+      }];
+    });
+    if (usableWords.length === 0 || usableWords.length !== words.length) {
+      return this.createFallbackRuns(text, fallbackStartMs, fallbackEndMs);
+    }
+
+    const runs: FinalRun[] = [];
+    for (const word of usableWords) {
+      const current: FinalRun | undefined = runs.length > 0 ? runs[runs.length - 1] : undefined;
+      const speaker: number | null = word.speaker ?? current?.speaker ?? null;
+      const nextText = current ? this.joinTranscript(current.text, word.token) : word.token;
+      const speakerChanged = current
+        ? current.speaker !== null && speaker !== null && current.speaker !== speaker
+        : false;
+      const wordGapMs = current ? word.startMs - current.endMs : 0;
+      const sentenceEnded = current ? this.hasSentenceEndingPunctuation(current.text) : false;
+      const exceedsDuration = current ? word.endMs - current.startMs > this.options.maxSegmentMs : false;
+      const exceedsCharacters = current ? nextText.length > this.options.maxSegmentCharacters : false;
+      if (!current || speakerChanged || wordGapMs >= this.options.utteranceEndMs || sentenceEnded || exceedsDuration || exceedsCharacters) {
+        const boundaryBefore: FlushReason | undefined = !current
+          ? undefined
+          : speakerChanged
+            ? "speaker_change"
+            : wordGapMs >= this.options.utteranceEndMs
+              ? "utterance_end"
+              : sentenceEnded
+                ? "speech_final"
+                : "hard_limit";
+        runs.push({ startMs: word.startMs, endMs: word.endMs, text: word.token, speaker, boundaryBefore });
+      } else {
+        current.endMs = Math.max(current.endMs, word.endMs);
+        current.text = nextText;
+        current.speaker ??= speaker;
+      }
+    }
+
+    if (runs.length === 1) runs[0].text = text;
+    return runs;
+  }
+
+  private createFallbackRuns(text: string, startMs: number, endMs: number): FinalRun[] {
+    const characters = [...text];
+    const durationMs = Math.max(1, endMs - startMs);
+    const maxCharactersByDuration = Math.max(
+      1,
+      Math.floor(characters.length * this.options.maxSegmentMs / durationMs),
+    );
+    const pieceLimit = Math.min(this.options.maxSegmentCharacters, maxCharactersByDuration);
+    const pieces: Array<{ text: string; reasonAfter: FlushReason }> = [];
+    let current = "";
+
+    for (let index = 0; index < characters.length; index += 1) {
+      current += characters[index];
+      const sentenceEnded = /[。！？!?]/u.test(characters[index]);
+      if (sentenceEnded) {
+        while (index + 1 < characters.length && /["'」』）》】]/u.test(characters[index + 1])) {
+          index += 1;
+          current += characters[index];
+        }
+      }
+      if (sentenceEnded || [...current].length >= pieceLimit) {
+        pieces.push({ text: current, reasonAfter: sentenceEnded ? "speech_final" : "hard_limit" });
+        current = "";
+      }
+    }
+    if (current) pieces.push({ text: current, reasonAfter: "speech_final" });
+
+    let consumedCharacters = 0;
+    return pieces.map((piece, index) => {
+      const pieceCharacters = [...piece.text].length;
+      const pieceStartMs = startMs + Math.round(durationMs * consumedCharacters / characters.length);
+      consumedCharacters += pieceCharacters;
+      const pieceEndMs = index === pieces.length - 1
+        ? endMs
+        : startMs + Math.round(durationMs * consumedCharacters / characters.length);
+      return {
+        startMs: pieceStartMs,
+        endMs: Math.max(pieceStartMs + 1, pieceEndMs),
+        text: piece.text,
+        speaker: null,
+        boundaryBefore: index === 0 ? undefined : pieces[index - 1].reasonAfter,
+      };
+    });
+  }
+
+  private ensureTerminalPunctuation(text: string, reason: FlushReason): string {
+    const trimmed = text.trim();
+    if (!trimmed || /[。！？!?；;，,、：:…]["'」』）》】]?$/u.test(trimmed)) return trimmed;
+    if (reason === "hard_limit") return `${trimmed}，`;
+    if (/(嗎|呢|麼)$/u.test(trimmed)) return `${trimmed}？`;
+    return `${trimmed}。`;
+  }
+
+  private hasSentenceEndingPunctuation(text: string): boolean {
+    return /[。！？!?]["'」』）》】]?$/u.test(text.trim());
   }
 
   private emitSpeakerRuns(words: DeepgramWord[]): void {
