@@ -123,6 +123,20 @@ button:disabled { opacity: 0.55; cursor: wait; }
 .empty { padding: 90px 20px; text-align: center; color: #849089; }
 .empty span { display: block; color: #17221e; font-size: 1.5rem; font-weight: 750; }
 
+.follow-live {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  z-index: 20;
+  transform: translateX(-50%);
+  padding: 0.7rem 1.2rem;
+  background: #13221d;
+  color: #f8f7f1;
+  font-size: 0.9rem;
+  box-shadow: 0 12px 30px rgb(19 34 29 / 28%);
+}
+.follow-live:hover { background: #24413a; }
+
 .pause-button {
   background: #fff;
   border: 1px solid #bdcbc2;

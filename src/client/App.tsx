@@ -12,6 +12,19 @@ declare global {
   }
 }
 
+/** How close to the end still counts as watching the newest speech. */
+const FOLLOW_BOTTOM_THRESHOLD_PX = 120;
+/** Keys that move the page on their own, so pressing one is a request to look away. */
+const SCROLL_AWAY_KEYS = new Set(["PageUp", "Home", "ArrowUp"]);
+
+function distanceFromPageEnd(): number {
+  return document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
+}
+
+function prefersReducedMotion(): boolean {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
 interface CreateResponse {
   meeting: Meeting;
   accessCode: string;
@@ -64,6 +77,7 @@ export function App() {
   const [speakers, setSpeakers] = useState<MeetingSpeaker[]>([]);
   const [readableVariants, setReadableVariants] = useState<ReadableVariant[]>([]);
   const [interim, setInterim] = useState<InterimTranscript | null>(null);
+  const [followLive, setFollowLive] = useState(true);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [providers, setProviders] = useState<ProviderStatus | null>(null);
   const [desktopSettings, setDesktopSettings] = useState<DesktopSettingsSummary | null>(null);
@@ -89,6 +103,7 @@ export function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const transcriptEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     try {
@@ -164,6 +179,46 @@ export function App() {
     setSpeakerDrafts((current) => Object.fromEntries(speakers.map((speaker) => [speaker.id, current[speaker.id] ?? speaker.displayName])));
     setMergeTargets((current) => Object.fromEntries(speakers.map((speaker) => [speaker.id, current[speaker.id] ?? ""])));
   }, [speakers]);
+
+  const isRecording = meeting?.status === "recording";
+
+  // Reading something earlier stops the page from yanking the reader forward, and
+  // arriving back at the end picks the live transcript up again. Only a deliberate
+  // gesture releases the follow: a plain scroll event cannot be told apart from the
+  // smooth scrolling this component drives itself.
+  useEffect(() => {
+    if (!isRecording) return;
+    setFollowLive(true);
+    const releaseOnWheel = (event: WheelEvent) => {
+      if (event.deltaY < 0) setFollowLive(false);
+    };
+    const releaseOnTouch = () => setFollowLive(false);
+    const releaseOnKey = (event: KeyboardEvent) => {
+      if (SCROLL_AWAY_KEYS.has(event.key)) setFollowLive(false);
+    };
+    const resumeAtEnd = () => {
+      if (distanceFromPageEnd() <= FOLLOW_BOTTOM_THRESHOLD_PX) setFollowLive(true);
+    };
+    window.addEventListener("wheel", releaseOnWheel, { passive: true });
+    window.addEventListener("touchmove", releaseOnTouch, { passive: true });
+    window.addEventListener("keydown", releaseOnKey);
+    window.addEventListener("scroll", resumeAtEnd, { passive: true });
+    return () => {
+      window.removeEventListener("wheel", releaseOnWheel);
+      window.removeEventListener("touchmove", releaseOnTouch);
+      window.removeEventListener("keydown", releaseOnKey);
+      window.removeEventListener("scroll", resumeAtEnd);
+    };
+  }, [isRecording]);
+
+  // Keep the newest speech on screen. Repeated calls retarget the running animation,
+  // so a burst of interim updates reads as one continuous glide. A long way behind —
+  // joining a meeting already in progress — jumps instead of animating all the way down.
+  useEffect(() => {
+    if (!isRecording || !followLive) return;
+    const animate = !prefersReducedMotion() && distanceFromPageEnd() < window.innerHeight * 3;
+    transcriptEndRef.current?.scrollIntoView({ behavior: animate ? "smooth" : "auto", block: "end" });
+  }, [isRecording, followLive, segments.length, interim?.text]);
 
   async function saveDesktopSettings(): Promise<void> {
     if (!window.desktopSettings || !desktopSettings) return;
@@ -990,7 +1045,11 @@ export function App() {
           </article>
         ))}
         {interim && <article className="utterance interim"><div className="speaker"><span>{interim.speaker}</span><time>{formatTime(interim.startMs)}</time></div><p>{interim.text}</p></article>}
+        <div ref={transcriptEndRef} aria-hidden="true" />
       </section>
+      {isRecording && !followLive && (
+        <button className="follow-live" onClick={() => setFollowLive(true)}>↓ 回到最新</button>
+      )}
     </main>
   );
 }
