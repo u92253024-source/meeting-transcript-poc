@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { InterimTranscript, Meeting, MeetingSpeaker, ProviderStatus, ReadableVariant, ServerEvent, TranscriptSegment } from "../shared/types";
+import type { InterimTranscript, Meeting, MeetingSpeaker, MeetingSummary, ProviderStatus, ReadableVariant, ServerEvent, TranscriptSegment } from "../shared/types";
 import type { DesktopSettingsInput, DesktopSettingsSummary, DesktopTranscriptionMode } from "../shared/desktop-settings";
 import { encodeAdminCredential } from "../shared/admin-credential";
 
@@ -45,11 +45,19 @@ function readableStatusLabel(status: Meeting["readable"]["status"]): string {
 
 export function App() {
   const [title, setTitle] = useState("中文會議測試");
-  const [adminPassword, setAdminPassword] = useState("");
+  const [adminPassword, setAdminPassword] = useState(() => {
+    try {
+      return window.sessionStorage.getItem("adminPassword") || "";
+    } catch {
+      return "";
+    }
+  });
   const [initialAdminPassword, setInitialAdminPassword] = useState("");
   const [initialAdminPasswordConfirmation, setInitialAdminPasswordConfirmation] = useState("");
   const [meetingIdInput, setMeetingIdInput] = useState("");
   const [accessCodeInput, setAccessCodeInput] = useState("");
+  const [pastMeetings, setPastMeetings] = useState<MeetingSummary[]>([]);
+  const [loadingMeetings, setLoadingMeetings] = useState(false);
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [accessCode, setAccessCode] = useState("");
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
@@ -62,9 +70,11 @@ export function App() {
   const [desktopMode, setDesktopMode] = useState<DesktopTranscriptionMode>("mock");
   const [desktopGoogleProject, setDesktopGoogleProject] = useState("");
   const [deepgramApiKey, setDeepgramApiKey] = useState("");
+  const [museVoiceApiKey, setMuseVoiceApiKey] = useState("");
   const [assemblyAiApiKey, setAssemblyAiApiKey] = useState("");
   const [geminiApiKey, setGeminiApiKey] = useState("");
   const [clearDeepgramApiKey, setClearDeepgramApiKey] = useState(false);
+  const [clearMuseVoiceApiKey, setClearMuseVoiceApiKey] = useState(false);
   const [clearAssemblyAiApiKey, setClearAssemblyAiApiKey] = useState(false);
   const [clearGeminiApiKey, setClearGeminiApiKey] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -81,10 +91,38 @@ export function App() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
+    try {
+      if (adminPassword) {
+        window.sessionStorage.setItem("adminPassword", adminPassword);
+      }
+    } catch {}
+  }, [adminPassword]);
+
+  async function fetchPastMeetings(): Promise<void> {
+    setLoadingMeetings(true);
+    try {
+      const headers: Record<string, string> = {};
+      if (adminPassword) {
+        headers["x-admin-password-encoded"] = encodeAdminCredential(adminPassword);
+      }
+      const response = await fetch("/api/meetings", { headers });
+      if (response.ok) {
+        const data = await response.json() as { meetings: MeetingSummary[] };
+        setPastMeetings(data.meetings ?? []);
+      }
+    } catch {
+      // 忽略暫時性網路錯誤
+    } finally {
+      setLoadingMeetings(false);
+    }
+  }
+
+  useEffect(() => {
     void fetch("/api/health")
       .then((response) => response.json())
       .then((data: { providers: ProviderStatus }) => setProviders(data.providers))
       .catch(() => setWarnings((current) => [...current, "無法連線到本機伺服器"]));
+    void fetchPastMeetings();
     if (window.desktopSettings) {
       void window.desktopSettings.get()
         .then((settings) => {
@@ -93,6 +131,12 @@ export function App() {
           setDesktopGoogleProject(settings.googleCloudProject);
         })
         .catch((error) => setWarnings((current) => [...current, error instanceof Error ? error.message : String(error)]));
+    }
+    const params = new URLSearchParams(window.location.search);
+    const urlMeetingId = params.get("meeting");
+    const urlCode = params.get("code");
+    if (urlMeetingId && urlCode) {
+      void joinMeeting(urlMeetingId, urlCode);
     }
     return () => cleanupAudio();
   }, []);
@@ -131,17 +175,21 @@ export function App() {
         transcriptionMode: desktopMode,
         googleCloudProject: desktopGoogleProject,
         deepgramApiKey,
+        museVoiceApiKey,
         assemblyAiApiKey,
         geminiApiKey,
         clearDeepgramApiKey,
+        clearMuseVoiceApiKey,
         clearAssemblyAiApiKey,
         clearGeminiApiKey,
       });
       setDesktopSettings(saved);
       setDeepgramApiKey("");
+      setMuseVoiceApiKey("");
       setAssemblyAiApiKey("");
       setGeminiApiKey("");
       setClearDeepgramApiKey(false);
+      setClearMuseVoiceApiKey(false);
       setClearAssemblyAiApiKey(false);
       setClearGeminiApiKey(false);
     } catch (error) {
@@ -207,22 +255,67 @@ export function App() {
     }
   }
 
-  async function joinMeeting(): Promise<void> {
+  async function joinMeeting(targetId?: string, targetCode?: string): Promise<void> {
     setBusy(true);
     setWarnings([]);
+    const id = (targetId ?? meetingIdInput).trim();
+    const code = (targetCode ?? accessCodeInput).trim().toUpperCase();
+    if (!id || !code) {
+      setWarnings(["請輸入會議 ID 與會議存取碼"]);
+      setBusy(false);
+      return;
+    }
     try {
-      const response = await fetch(`/api/meetings/${encodeURIComponent(meetingIdInput)}?code=${encodeURIComponent(accessCodeInput)}`);
+      const response = await fetch(`/api/meetings/${encodeURIComponent(id)}?code=${encodeURIComponent(code)}`);
       const payload = await response.json() as { meeting?: Meeting; segments?: TranscriptSegment[]; speakers?: MeetingSpeaker[]; readableVariants?: ReadableVariant[]; error?: string };
       if (!response.ok || !payload.meeting) throw new Error(payload.error ?? "無法加入會議");
       setMeeting(payload.meeting);
       setSegments(payload.segments ?? []);
       setSpeakers(payload.speakers ?? []);
       setReadableVariants(payload.readableVariants ?? []);
-      setAccessCode(accessCodeInput);
+      setAccessCode(code);
       setIsHost(false);
-      await connectSocket(payload.meeting.id, "viewer", accessCodeInput);
+      await connectSocket(payload.meeting.id, "viewer", code);
     } catch (error) {
       setWarnings([error instanceof Error ? error.message : String(error)]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function returnToList(): void {
+    cleanupAudio();
+    socketRef.current?.close();
+    setMeeting(null);
+    setSegments([]);
+    setSpeakers([]);
+    setReadableVariants([]);
+    setInterim(null);
+    setWarnings([]);
+    try {
+      window.history.replaceState({}, document.title, window.location.pathname);
+    } catch {}
+    void fetchPastMeetings();
+  }
+
+  async function deletePastMeeting(id: string, meetingTitle: string): Promise<void> {
+    if (!adminPassword) {
+      setWarnings(["刪除歷史會議需要管理密碼，請先於設定區輸入管理密碼"]);
+      return;
+    }
+    const confirmed = window.confirm(`確定要永久刪除「${meetingTitle}」整場會議紀錄與錄音嗎？此操作無法復原。`);
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      const response = await fetch(`/api/meetings/${id}`, {
+        method: "DELETE",
+        headers: { "x-admin-password-encoded": encodeAdminCredential(adminPassword) },
+      });
+      const payload = await response.json() as { deleted?: boolean; error?: string };
+      if (!response.ok || !payload.deleted) throw new Error(payload.error ?? "無法刪除會議");
+      void fetchPastMeetings();
+    } catch (error) {
+      setWarnings((current) => [...current, error instanceof Error ? error.message : String(error)]);
     } finally {
       setBusy(false);
     }
@@ -375,14 +468,7 @@ export function App() {
       });
       const payload = await response.json() as { deleted?: boolean; error?: string };
       if (!response.ok || !payload.deleted) throw new Error(payload.error ?? "無法刪除會議");
-      socketRef.current?.close();
-      cleanupAudio();
-      setMeeting(null);
-      setSegments([]);
-      setSpeakers([]);
-      setReadableVariants([]);
-      setAccessCode("");
-      setIsHost(false);
+      returnToList();
     } catch (error) {
       setWarnings((current) => [...current, error instanceof Error ? error.message : String(error)]);
     } finally {
@@ -590,6 +676,8 @@ export function App() {
                 <select value={desktopMode} onChange={(event) => setDesktopMode(event.target.value as DesktopTranscriptionMode)}>
                   <option value="deepgram-assembly">Deepgram 即時字幕＋AssemblyAI 會後講者修正</option>
                   <option value="deepgram">Deepgram 即時字幕</option>
+                  <option value="muse-voice">Muse Voice Transcribe 即時字幕（Meta）</option>
+                  <option value="muse-voice-assembly">Muse Voice 即時字幕＋AssemblyAI 會後講者修正</option>
                   <option value="cloud">Google Cloud Speech-to-Text</option>
                   <option value="cloud-stt-only">Google Cloud Speech-to-Text（不啟用會後講者修正）</option>
                   <option value="mock">Mock（不使用付費 API）</option>
@@ -602,6 +690,10 @@ export function App() {
               <label>
                 Deepgram API Key {desktopSettings.deepgramConfigured ? <small>已設定</small> : <small>未設定</small>}
                 <input type="password" value={deepgramApiKey} onChange={(event) => setDeepgramApiKey(event.target.value)} placeholder={desktopSettings.deepgramConfigured ? "已設定；留空即不變更" : "貼上 Deepgram API Key"} autoComplete="new-password" />
+              </label>
+              <label>
+                Muse Voice API Key {desktopSettings.museVoiceConfigured ? <small>已設定</small> : <small>未設定</small>}
+                <input type="password" value={museVoiceApiKey} onChange={(event) => setMuseVoiceApiKey(event.target.value)} placeholder={desktopSettings.museVoiceConfigured ? "已設定；留空即不變更" : "貼上 Meta / Muse Voice API Key"} autoComplete="new-password" />
               </label>
               <label>
                 AssemblyAI API Key {desktopSettings.assemblyAiConfigured ? <small>已設定</small> : <small>未設定</small>}
@@ -618,12 +710,81 @@ export function App() {
             </div>
             <div className="desktop-clear-keys">
               <label><input type="checkbox" checked={clearDeepgramApiKey} onChange={(event) => setClearDeepgramApiKey(event.target.checked)} /> 清除 Deepgram 金鑰</label>
+              <label><input type="checkbox" checked={clearMuseVoiceApiKey} onChange={(event) => setClearMuseVoiceApiKey(event.target.checked)} /> 清除 Muse Voice 金鑰</label>
               <label><input type="checkbox" checked={clearAssemblyAiApiKey} onChange={(event) => setClearAssemblyAiApiKey(event.target.checked)} /> 清除 AssemblyAI 金鑰</label>
               <label><input type="checkbox" checked={clearGeminiApiKey} onChange={(event) => setClearGeminiApiKey(event.target.checked)} /> 清除 Gemini 金鑰</label>
             </div>
             <button disabled={busy || !desktopSettings.encryptionAvailable}>{busy ? "儲存中…" : "儲存並重新啟動服務"}</button>
           </form>
         )}
+        <section className="panel history-panel">
+          <div className="history-header">
+            <div>
+              <p className="step">HISTORY & DRAFTS</p>
+              <h2>過往會議逐字稿紀錄 {pastMeetings.length > 0 && <span className="count-pill">{pastMeetings.length}</span>}</h2>
+            </div>
+            <button type="button" className="ghost mini-refresh" disabled={loadingMeetings} onClick={() => void fetchPastMeetings()}>
+              {loadingMeetings ? "載入中…" : "🔄 重新整理"}
+            </button>
+          </div>
+
+          {pastMeetings.length === 0 ? (
+            <div className="empty-history">
+              <p>目前尚無過往會議紀錄。您可以從下方「開始新會議」啟動麥克風與逐字稿。</p>
+            </div>
+          ) : (
+            <div className="history-list">
+              {pastMeetings.map((item) => {
+                let statusBadge = "初稿暫存中";
+                let statusClass = "draft";
+                if (item.status === "recording") {
+                  statusBadge = "🔴 錄音進行中";
+                  statusClass = "recording";
+                } else if (item.postprocess.status === "processing") {
+                  statusBadge = "⏳ 講者修正中";
+                  statusClass = "processing";
+                } else if (item.postprocess.status === "completed") {
+                  statusBadge = "✅ 講者修正完成";
+                  statusClass = "completed";
+                } else if (item.readable.status === "completed") {
+                  statusBadge = "📝 易讀稿已產生";
+                  statusClass = "readable";
+                }
+
+                return (
+                  <article className="history-card" key={item.id} onClick={() => void joinMeeting(item.id, item.viewerCode)}>
+                    <div className="history-card-main">
+                      <div className="history-card-title-row">
+                        <span className={`status-pill ${statusClass}`}>{statusBadge}</span>
+                        <h3>{item.title}</h3>
+                      </div>
+                      <div className="history-card-meta">
+                        <span>📅 {new Date(item.startedAt).toLocaleString("zh-TW", { hour12: false })}</span>
+                        <span>⏱️ 錄音長度：{formatTime(item.postprocess.audioDurationMs)}</span>
+                        <span>💬 {item.segmentCount} 段逐字稿 · 👥 {item.speakerCount} 位講者</span>
+                        {item.recording.audioDeletedAt && <span className="audio-deleted-badge">錄音已清除</span>}
+                      </div>
+                    </div>
+                    <div className="history-card-actions" onClick={(e) => e.stopPropagation()}>
+                      <button type="button" className="open-btn" onClick={() => void joinMeeting(item.id, item.viewerCode)}>
+                        開啟會議 ➔
+                      </button>
+                      <a className="export-link" href={`/api/meetings/${encodeURIComponent(item.id)}/export/docx?code=${encodeURIComponent(item.viewerCode)}&version=verbatim`} download onClick={(e) => e.stopPropagation()}>
+                        DOCX
+                      </a>
+                      <a className="export-link" href={`/api/meetings/${encodeURIComponent(item.id)}/export/pdf?code=${encodeURIComponent(item.viewerCode)}&version=verbatim`} download onClick={(e) => e.stopPropagation()}>
+                        PDF
+                      </a>
+                      <button type="button" className="delete-past-btn" title="刪除會議紀錄" onClick={() => void deletePastMeeting(item.id, item.title)}>
+                        刪除
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
         <section className="setup-grid">
           <form className="panel" onSubmit={(event) => { event.preventDefault(); void createMeeting(); }}>
             <p className="step">主機</p>
@@ -651,12 +812,27 @@ export function App() {
         <div><p className="eyebrow">{meeting.status === "recording" ? "● LIVE" : "MEETING ENDED"}</p><h1>{meeting.title}</h1></div>
         <div className="meeting-actions">
           {isHost && meeting.status === "recording" && <button className="danger" disabled={busy} onClick={() => void stopMeeting()}>結束會議</button>}
+          <button type="button" className="ghost pause-button" onClick={() => returnToList()} title="目前進度已存入本機資料庫，隨時可重新開啟">
+            💾 暫存並返回清單
+          </button>
         </div>
       </header>
       <section className="share-strip">
         <span>會議 ID <strong>{meeting.id}</strong></span>
         {isHost && <><span>觀看碼 <strong>{accessCode}</strong></span><span className="share-url">{shareUrl}</span></>}
       </section>
+      {meeting.status === "stopped" && (
+        <section className="progress-saved-banner">
+          <div className="saved-icon">💾</div>
+          <div className="saved-content">
+            <strong>目前逐字稿與錄音已安全保存在本機資料庫</strong>
+            <p>
+              錄音長度 <strong>{formatTime(meeting.postprocess.audioDurationMs)}</strong>，共已保存 <strong>{segments.length}</strong> 段即時發言。
+              您可以隨時點擊右上角「<strong>暫存並返回清單</strong>」離開，稍後從首頁歷史紀錄重新開啟接續完成會後講者修正、Gemini 易讀化或匯出公文。
+            </p>
+          </div>
+        </section>
+      )}
       {meeting.status === "stopped" && (
         <section className="postprocess-card">
           <div>

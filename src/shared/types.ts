@@ -52,6 +52,12 @@ export interface Meeting {
   recording: RecordingInfo;
 }
 
+export interface MeetingSummary extends Meeting {
+  viewerCode: string;
+  segmentCount: number;
+  speakerCount: number;
+}
+
 export interface TranscriptSegment {
   id: string;
   meetingId: string;
@@ -93,10 +99,11 @@ export type ServerEvent =
   | { type: "warning"; message: string };
 
 export interface ProviderStatus {
-  mode: "mock" | "cloud" | "cloud-stt-only" | "deepgram" | "deepgram-assembly";
+  mode: "mock" | "cloud" | "cloud-stt-only" | "deepgram" | "deepgram-assembly" | "muse-voice" | "muse-voice-assembly";
   cloudSttConfigured: boolean;
   assemblyAiConfigured: boolean;
   deepgramConfigured: boolean;
+  museVoiceConfigured: boolean;
   geminiConfigured: boolean;
   readableModel: string;
   adminPasswordConfigured: boolean;

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { Meeting, MeetingSpeaker, PostprocessStatus, ReadableReviewStatus, ReadableVariant, TranscriptSegment } from "../shared/types.js";
+import type { Meeting, MeetingSpeaker, MeetingSummary, PostprocessStatus, ReadableReviewStatus, ReadableVariant, TranscriptSegment } from "../shared/types.js";
 
 interface MeetingRow {
   id: string;
@@ -246,6 +246,23 @@ export class TranscriptDatabase {
   getMeeting(id: string): Meeting | null {
     const row = this.db.prepare("SELECT * FROM meetings WHERE id = ?").get(id) as MeetingRow | undefined;
     return row ? this.mapMeeting(row) : null;
+  }
+
+  listMeetings(): MeetingSummary[] {
+    const rows = this.db.prepare(`
+      SELECT m.*,
+        (SELECT COUNT(*) FROM transcript_segments WHERE meeting_id = m.id) AS segment_count,
+        (SELECT COUNT(*) FROM meeting_speakers WHERE meeting_id = m.id) AS speaker_count
+      FROM meetings m
+      ORDER BY m.started_at DESC
+    `).all() as unknown as Array<MeetingRow & { segment_count: number; speaker_count: number }>;
+
+    return rows.map((row) => ({
+      ...this.mapMeeting(row),
+      viewerCode: row.viewer_code,
+      segmentCount: Number(row.segment_count || 0),
+      speakerCount: Number(row.speaker_count || 0),
+    }));
   }
 
   stopMeeting(id: string, audioDurationMs = 0, estimatedCostUsd = 0): Meeting | null {

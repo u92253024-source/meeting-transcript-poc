@@ -16,7 +16,7 @@ import { encodeAdminCredential } from "../shared/admin-credential.js";
 interface StoredDesktopSettings {
   transcriptionMode?: DesktopTranscriptionMode;
   googleCloudProject?: string;
-  encryptedSecrets?: Partial<Record<"deepgram" | "assembly" | "gemini", string>>;
+  encryptedSecrets?: Partial<Record<"deepgram" | "museVoice" | "assembly" | "gemini", string>>;
 }
 
 let serverProcess: ChildProcess | undefined;
@@ -54,7 +54,7 @@ async function writeStoredSettings(settings: StoredDesktopSettings): Promise<voi
   await fs.rename(temporaryPath, settingsPath());
 }
 
-function decryptSecret(settings: StoredDesktopSettings, key: "deepgram" | "assembly" | "gemini"): string {
+function decryptSecret(settings: StoredDesktopSettings, key: "deepgram" | "museVoice" | "assembly" | "gemini"): string {
   const encrypted = settings.encryptedSecrets?.[key];
   if (!encrypted || !safeStorage.isEncryptionAvailable()) return "";
   try {
@@ -71,6 +71,7 @@ function toSummary(settings: StoredDesktopSettings): DesktopSettingsSummary {
     transcriptionMode: settings.transcriptionMode ?? "mock",
     googleCloudProject: settings.googleCloudProject ?? "",
     deepgramConfigured: Boolean(decryptSecret(settings, "deepgram")),
+    museVoiceConfigured: Boolean(decryptSecret(settings, "museVoice")),
     assemblyAiConfigured: Boolean(decryptSecret(settings, "assembly")),
     geminiConfigured: Boolean(decryptSecret(settings, "gemini")),
   };
@@ -87,9 +88,11 @@ function normalizeSettingsInput(value: unknown): DesktopSettingsInput {
     transcriptionMode: input.transcriptionMode as DesktopTranscriptionMode,
     googleCloudProject: normalize(input.googleCloudProject) ?? "",
     deepgramApiKey: normalize(input.deepgramApiKey),
+    museVoiceApiKey: normalize(input.museVoiceApiKey),
     assemblyAiApiKey: normalize(input.assemblyAiApiKey),
     geminiApiKey: normalize(input.geminiApiKey),
     clearDeepgramApiKey: input.clearDeepgramApiKey === true,
+    clearMuseVoiceApiKey: input.clearMuseVoiceApiKey === true,
     clearAssemblyAiApiKey: input.clearAssemblyAiApiKey === true,
     clearGeminiApiKey: input.clearGeminiApiKey === true,
   };
@@ -97,7 +100,7 @@ function normalizeSettingsInput(value: unknown): DesktopSettingsInput {
 
 function updateEncryptedSecret(
   settings: StoredDesktopSettings,
-  key: "deepgram" | "assembly" | "gemini",
+  key: "deepgram" | "museVoice" | "assembly" | "gemini",
   value: string | undefined,
   clear: boolean | undefined,
 ): void {
@@ -141,6 +144,7 @@ async function startLocalServer(): Promise<string> {
       TRANSCRIPTION_MODE: settings.transcriptionMode ?? "mock",
       GOOGLE_CLOUD_PROJECT: settings.googleCloudProject ?? "",
       DEEPGRAM_API_KEY: decryptSecret(settings, "deepgram"),
+      MUSE_VOICE_API_KEY: decryptSecret(settings, "museVoice"),
       ASSEMBLYAI_API_KEY: decryptSecret(settings, "assembly"),
       GEMINI_API_KEY: decryptSecret(settings, "gemini"),
     },
@@ -194,6 +198,7 @@ ipcMain.handle("desktop-settings:save", async (_event, rawInput: unknown): Promi
   settings.transcriptionMode = input.transcriptionMode;
   settings.googleCloudProject = input.googleCloudProject;
   updateEncryptedSecret(settings, "deepgram", input.deepgramApiKey, input.clearDeepgramApiKey);
+  updateEncryptedSecret(settings, "museVoice", input.museVoiceApiKey, input.clearMuseVoiceApiKey);
   updateEncryptedSecret(settings, "assembly", input.assemblyAiApiKey, input.clearAssemblyAiApiKey);
   updateEncryptedSecret(settings, "gemini", input.geminiApiKey, input.clearGeminiApiKey);
   await writeStoredSettings(settings);

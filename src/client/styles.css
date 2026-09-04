@@ -123,6 +123,181 @@ button:disabled { opacity: 0.55; cursor: wait; }
 .empty { padding: 90px 20px; text-align: center; color: #849089; }
 .empty span { display: block; color: #17221e; font-size: 1.5rem; font-weight: 750; }
 
+.pause-button {
+  background: #fff;
+  border: 1px solid #bdcbc2;
+  color: #17221e;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.pause-button:hover {
+  background: #edf3ed;
+  border-color: #79a58e;
+}
+
+.progress-saved-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 18px 24px;
+  border-radius: 18px;
+  background: #e6f4ea;
+  border: 1px solid #b7dfca;
+  color: #1a4231;
+  margin: 0 0 24px;
+}
+.progress-saved-banner .saved-icon {
+  font-size: 1.6rem;
+  line-height: 1;
+}
+.progress-saved-banner .saved-content strong {
+  display: block;
+  font-size: 1.05rem;
+  margin-bottom: 4px;
+  color: #133a28;
+}
+.progress-saved-banner .saved-content p {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.55;
+  color: #3b5c4e;
+}
+
+.history-panel {
+  margin-top: 24px;
+  border: 1px solid #cbd8d0;
+}
+.history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.count-pill {
+  display: inline-block;
+  vertical-align: middle;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: #c8f06b;
+  color: #13221d;
+  font-size: 0.85rem;
+  font-weight: 800;
+  margin-left: 8px;
+}
+.mini-refresh {
+  padding: 0.5rem 0.9rem;
+  font-size: 0.8rem;
+}
+.empty-history {
+  padding: 24px;
+  text-align: center;
+  color: #69756f;
+  background: #f8faf8;
+  border-radius: 14px;
+}
+.empty-history p {
+  margin: 0;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.history-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  border: 1px solid #e1e8e4;
+  border-radius: 16px;
+  background: #fafbf9;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+.history-card:hover {
+  background: #fff;
+  border-color: #79a58e;
+  box-shadow: 0 4px 16px rgb(19 34 29 / 6%);
+}
+.history-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.history-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.history-card-title-row h3 {
+  margin: 0;
+  font-size: 1.15rem;
+  color: #17221e;
+}
+.status-pill {
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 3px 10px;
+  border-radius: 999px;
+  letter-spacing: 0.02em;
+}
+.status-pill.draft { background: #e3ede6; color: #28543f; }
+.status-pill.recording { background: #fee2e2; color: #991b1b; }
+.status-pill.processing { background: #fef3c7; color: #92400e; }
+.status-pill.completed { background: #dcfce7; color: #166534; }
+.status-pill.readable { background: #e0e7ff; color: #3730a3; }
+
+.history-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  color: #69756f;
+  font-size: 0.8rem;
+}
+.audio-deleted-badge {
+  color: #92400e;
+  font-weight: 700;
+}
+
+.history-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.open-btn {
+  padding: 0.55rem 1rem;
+  font-size: 0.82rem;
+}
+.export-link {
+  border-radius: 999px;
+  padding: 0.45rem 0.75rem;
+  background: #edf3ed;
+  color: #1f5d47;
+  font-size: 0.75rem;
+  font-weight: 800;
+  text-decoration: none;
+}
+.export-link:hover {
+  background: #c8f06b;
+}
+.delete-past-btn {
+  padding: 0.45rem 0.7rem;
+  font-size: 0.75rem;
+  background: transparent;
+  color: #842e25;
+  border: 1px solid #eecbc7;
+}
+.delete-past-btn:hover {
+  background: #ffe3de;
+}
+
 @media (max-width: 720px) {
   .shell, .meeting-shell { width: min(100% - 20px, 1120px); padding-top: 10px; }
   .hero { padding: 28px; border-radius: 22px; }
@@ -140,4 +315,6 @@ button:disabled { opacity: 0.55; cursor: wait; }
   .speaker-identity { align-items: start; flex-direction: column; }
   .utterance { grid-template-columns: 1fr; gap: 10px; }
   .speaker { flex-direction: row; justify-content: space-between; }
+  .history-card { flex-direction: column; align-items: stretch; }
+  .history-card-actions { justify-content: flex-end; }
 }

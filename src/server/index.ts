@@ -109,6 +109,7 @@ app.get("/api/health", async () => {
     cloudSttConfigured: Boolean(config.google.project),
     assemblyAiConfigured: Boolean(config.assembly.apiKey),
     deepgramConfigured: Boolean(config.deepgram.apiKey),
+    museVoiceConfigured: Boolean(config.museVoice.apiKey),
     geminiConfigured: Boolean(config.gemini.apiKey),
     readableModel: config.gemini.readableModel,
     adminPasswordConfigured: adminAuth.isConfigured,
@@ -133,6 +134,18 @@ app.post("/api/setup/admin-password", async (request, reply) => {
   const input = initialAdminPasswordInput.parse(request.body ?? {});
   adminAuth.configure(input.password);
   return reply.code(201).send({ adminPasswordConfigured: true });
+});
+
+app.get("/api/meetings", async (request, reply) => {
+  const isLoopback = isLoopbackAddress(request.ip);
+  const encodedPassword = decodeAdminCredential(request.headers["x-admin-password-encoded"]);
+  const password = encodedPassword ?? request.headers["x-admin-password"];
+  const isAdmin = adminAuth.verify(password);
+  if (!isLoopback && !isAdmin) {
+    return reply.code(403).send({ error: "只有主機本機或經管理驗證後可查看會議清單" });
+  }
+  const meetings = database.listMeetings();
+  return { meetings };
 });
 
 app.post("/api/meetings", async (request, reply) => {

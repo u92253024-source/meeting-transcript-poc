@@ -5,7 +5,15 @@ import { z } from "zod";
 dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || path.resolve(process.cwd(), ".env") });
 
 const schema = z.object({
-  TRANSCRIPTION_MODE: z.enum(["mock", "cloud", "cloud-stt-only", "deepgram", "deepgram-assembly"]).default("mock"),
+  TRANSCRIPTION_MODE: z.enum([
+    "mock",
+    "cloud",
+    "cloud-stt-only",
+    "deepgram",
+    "deepgram-assembly",
+    "muse-voice",
+    "muse-voice-assembly",
+  ]).default("mock"),
   HOST: z.string().default("0.0.0.0"),
   PORT: z.coerce.number().int().positive().default(3001),
   DATA_DIR: z.string().default("./data"),
@@ -27,6 +35,12 @@ const schema = z.object({
   DEEPGRAM_UTTERANCE_END_MS: z.coerce.number().int().min(1_000).max(10_000).default(1_000),
   DEEPGRAM_MAX_SEGMENT_MS: z.coerce.number().int().min(5_000).max(120_000).default(30_000),
   DEEPGRAM_MAX_SEGMENT_CHARACTERS: z.coerce.number().int().min(40).max(1_000).default(160),
+  MUSE_VOICE_API_KEY: z.string().default(""),
+  MUSE_VOICE_MODEL: z.string().default("muse-voice-transcribe-1.0"),
+  MUSE_VOICE_REALTIME_URL: z.string().default("wss://api.meta.ai/v1/asr/realtime"),
+  MUSE_VOICE_MODE: z.enum(["DIARIZATION", "ENDPOINTING", "PUSH_TO_TALK"]).default("DIARIZATION"),
+  MUSE_VOICE_MAX_SEGMENT_MS: z.coerce.number().int().min(5_000).max(120_000).default(30_000),
+  MUSE_VOICE_MAX_SEGMENT_CHARACTERS: z.coerce.number().int().min(40).max(1_000).default(160),
   GEMINI_API_KEY: z.string().default(""),
   GEMINI_READABLE_MODEL: z.string().default("gemini-3.5-flash-lite"),
   RECORDING_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
@@ -64,6 +78,14 @@ export const config = {
     utteranceEndMs: parsed.DEEPGRAM_UTTERANCE_END_MS,
     maxSegmentMs: parsed.DEEPGRAM_MAX_SEGMENT_MS,
     maxSegmentCharacters: parsed.DEEPGRAM_MAX_SEGMENT_CHARACTERS,
+  },
+  museVoice: {
+    apiKey: parsed.MUSE_VOICE_API_KEY,
+    model: parsed.MUSE_VOICE_MODEL,
+    realtimeUrl: parsed.MUSE_VOICE_REALTIME_URL,
+    mode: parsed.MUSE_VOICE_MODE,
+    maxSegmentMs: parsed.MUSE_VOICE_MAX_SEGMENT_MS,
+    maxSegmentCharacters: parsed.MUSE_VOICE_MAX_SEGMENT_CHARACTERS,
   },
   gemini: {
     apiKey: parsed.GEMINI_API_KEY,

@@ -8,6 +8,7 @@ import { AssemblyStreamingProvider } from "./providers/assembly-streaming.js";
 import { CloudSttProvider } from "./providers/cloud-stt.js";
 import { DeepgramProvider } from "./providers/deepgram.js";
 import { MockProvider } from "./providers/mock.js";
+import { MuseVoiceProvider } from "./providers/muse-voice.js";
 import type { AudioProvider, ProviderCallbacks, TextObservation } from "./providers/types.js";
 
 export class MeetingSession {
@@ -77,6 +78,9 @@ export class MeetingSession {
         // batch diarization replaces the labels after the recording is complete.
         new DeepgramProvider({ ...config.deepgram, diarization: true }, callbacks),
       ];
+    }
+    if (config.mode === "muse-voice" || config.mode === "muse-voice-assembly") {
+      return [new MuseVoiceProvider(config.museVoice, callbacks)];
     }
     const providers: AudioProvider[] = [new CloudSttProvider(config.google, callbacks)];
     if (config.mode === "cloud") {
