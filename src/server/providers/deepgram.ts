@@ -36,6 +36,17 @@ interface DeepgramResults {
   };
 }
 
+/** 16 kHz mono 16-bit PCM. */
+const BYTES_PER_MS = 32;
+/** Audio kept while the socket is down, just enough to bridge a quick reconnect. */
+const MAX_BRIDGE_MS = 10_000;
+const MAX_RECONNECT_ATTEMPTS = 8;
+
+interface QueuedAudio {
+  audio: Buffer;
+  startMs: number;
+}
+
 interface FinalRun {
   startMs: number;
   endMs: number;
@@ -49,9 +60,15 @@ type FlushReason = "speech_final" | "utterance_end" | "speaker_change" | "hard_l
 export class DeepgramProvider implements AudioProvider {
   readonly name = "deepgram-nova-3";
   private socket: WebSocket | null = null;
-  private queued: Buffer[] = [];
+  private queued: QueuedAudio[] = [];
+  private queuedBytes = 0;
   private readonly speakerMap = new Map<number, string>();
   private pendingFinal: FinalRun | null = null;
+  private lastProcessedMs = 0;
+  private sessionBaseMs = 0;
+  private stopped = false;
+  private reconnectAttempts = 0;
+  private reconnectTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly options: DeepgramOptions,
@@ -60,6 +77,10 @@ export class DeepgramProvider implements AudioProvider {
 
   async start(): Promise<void> {
     if (!this.options.apiKey) throw new Error("DEEPGRAM_API_KEY is not configured");
+    await this.openSocket();
+  }
+
+  private openSocket(): Promise<void> {
     const query = new URLSearchParams({
       model: this.options.model,
       language: this.options.language,
@@ -77,40 +98,99 @@ export class DeepgramProvider implements AudioProvider {
     if (this.options.diarization !== false) query.set("diarize_model", "latest");
     for (const keyterm of this.options.keyterms) query.append("keyterm", keyterm);
 
-    this.socket = new WebSocket(`wss://api.deepgram.com/v1/listen?${query}`, {
+    const socket = new WebSocket(`wss://api.deepgram.com/v1/listen?${query}`, {
       headers: { Authorization: `Token ${this.options.apiKey}` },
     });
-    this.socket.on("message", (data) => this.handleMessage(data.toString()));
-    this.socket.on("error", (error) => this.callbacks.onWarning(`Deepgram: ${error.message}`));
-    await new Promise<void>((resolve, reject) => {
-      this.socket!.once("open", () => {
-        for (const audio of this.queued) this.socket!.send(audio);
+    this.socket = socket;
+    socket.on("message", (data) => this.handleMessage(data.toString()));
+    socket.on("error", (error) => this.callbacks.onWarning(`Deepgram: ${error.message}`));
+    socket.on("close", (code, reason) => this.handleClose(socket, code, reason.toString()));
+    return new Promise<void>((resolve, reject) => {
+      socket.once("open", () => {
+        // Each connection times its words from zero, so anchor it to the meeting clock.
+        this.sessionBaseMs = this.queued[0]?.startMs ?? this.lastProcessedMs;
+        this.reconnectAttempts = 0;
+        for (const chunk of this.queued) socket.send(chunk.audio);
         this.queued = [];
+        this.queuedBytes = 0;
         resolve();
       });
-      this.socket!.once("error", reject);
+      socket.once("error", reject);
     });
   }
 
-  send(audio: Buffer): void {
-    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(audio);
-    else this.queued.push(Buffer.from(audio));
+  /**
+   * A dropped connection used to go unnoticed: audio kept piling into the queue while
+   * the transcript simply stopped. Report it, then reconnect and carry on.
+   */
+  private handleClose(socket: WebSocket, code: number, reason: string): void {
+    if (socket !== this.socket) return;
+    this.socket = null;
+    if (this.stopped) return;
+    // Keep whatever was finalized before the line went down.
+    this.flushPending("stream_end");
+    const detail = reason ? `${code} ${reason}` : String(code);
+    this.callbacks.onWarning(`Deepgram 連線中斷（${detail}），正在重新連線…`);
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || this.reconnectTimer) return;
+    this.reconnectAttempts += 1;
+    if (this.reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+      this.callbacks.onWarning("Deepgram 無法重新連線，即時逐字稿已停止；錄音仍在繼續，可於會後重新轉錄。");
+      return;
+    }
+    const delayMs = Math.min(30_000, 1_000 * 2 ** (this.reconnectAttempts - 1));
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.stopped) return;
+      void this.openSocket().catch((error: Error) => {
+        this.callbacks.onWarning(`Deepgram 重新連線失敗：${error.message}`);
+        this.scheduleReconnect();
+      });
+    }, delayMs);
+    this.reconnectTimer.unref();
+  }
+
+  send(audio: Buffer, audioPositionMs: number): void {
+    this.lastProcessedMs = Math.max(this.lastProcessedMs, audioPositionMs);
+    if (this.stopped) return;
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(audio);
+      return;
+    }
+    // Hold only a short bridge while the socket is down. Replaying minutes of backlog
+    // into a fresh connection would transcribe stale speech over the live meeting.
+    this.queued.push({ audio: Buffer.from(audio), startMs: audioPositionMs - audio.length / BYTES_PER_MS });
+    this.queuedBytes += audio.length;
+    while (this.queuedBytes > MAX_BRIDGE_MS * BYTES_PER_MS) {
+      const dropped = this.queued.shift();
+      if (!dropped) break;
+      this.queuedBytes -= dropped.audio.length;
+    }
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     const socket = this.socket;
-    if (!socket) return;
-    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "CloseStream" }));
-    await new Promise<void>((resolve) => {
-      if (socket.readyState === WebSocket.CLOSED) return resolve();
-      socket.once("close", resolve);
-      setTimeout(() => {
-        if (socket.readyState !== WebSocket.CLOSED) socket.close();
-        resolve();
-      }, 5_000).unref();
-    });
-    this.flushPending("stream_end");
     this.socket = null;
+    if (socket) {
+      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "CloseStream" }));
+      await new Promise<void>((resolve) => {
+        if (socket.readyState === WebSocket.CLOSED) return resolve();
+        socket.once("close", resolve);
+        setTimeout(() => {
+          if (socket.readyState !== WebSocket.CLOSED) socket.close();
+          resolve();
+        }, 5_000).unref();
+      });
+    }
+    this.flushPending("stream_end");
   }
 
   private handleMessage(raw: string): void {
@@ -131,12 +211,12 @@ export class DeepgramProvider implements AudioProvider {
 
     const words = alternative?.words ?? [];
     if (this.options.diarization !== false) this.emitSpeakerRuns(words);
-    const fallbackStart = Math.round((message.start ?? 0) * 1000);
+    const fallbackStart = this.toMeetingMs(message.start ?? 0);
     const fallbackEnd = fallbackStart + Math.round((message.duration ?? 0) * 1000);
     const wordStarts = words.flatMap((word) => typeof word.start === "number" ? [word.start] : []);
     const wordEnds = words.flatMap((word) => typeof word.end === "number" ? [word.end] : []);
-    const startMs = wordStarts.length ? Math.round(Math.min(...wordStarts) * 1000) : fallbackStart;
-    const endMs = wordEnds.length ? Math.round(Math.max(...wordEnds) * 1000) : fallbackEnd;
+    const startMs = wordStarts.length ? this.toMeetingMs(Math.min(...wordStarts)) : fallbackStart;
+    const endMs = wordEnds.length ? this.toMeetingMs(Math.max(...wordEnds)) : fallbackEnd;
     if (message.is_final) {
       const runs = this.createFinalRuns(text, words, startMs, endMs);
       for (const run of runs) this.appendFinal(run);
@@ -149,6 +229,11 @@ export class DeepgramProvider implements AudioProvider {
 
     const interimText = this.pendingFinal ? this.joinTranscript(this.pendingFinal.text, text) : text;
     this.emitInterim(this.pendingFinal?.startMs ?? startMs, endMs, interimText);
+  }
+
+  /** Converts a session-relative offset in seconds into a position on the meeting clock. */
+  private toMeetingMs(seconds: number): number {
+    return this.sessionBaseMs + Math.round(seconds * 1000);
   }
 
   private emitInterim(startMs: number, endMs: number, text: string): void {
@@ -217,8 +302,8 @@ export class DeepgramProvider implements AudioProvider {
       if (!token || typeof word.start !== "number" || typeof word.end !== "number") return [];
       return [{
         token,
-        startMs: Math.round(word.start * 1000),
-        endMs: Math.round(word.end * 1000),
+        startMs: this.toMeetingMs(word.start),
+        endMs: this.toMeetingMs(word.end),
         speaker: this.options.diarization === false || typeof word.speaker !== "number" ? null : word.speaker,
       }];
     });
@@ -322,8 +407,8 @@ export class DeepgramProvider implements AudioProvider {
     const flush = () => {
       if (!run) return;
       this.callbacks.onSpeaker?.({
-        startMs: Math.round(run.start * 1000),
-        endMs: Math.max(Math.round(run.start * 1000) + 1, Math.round(run.end * 1000)),
+        startMs: this.toMeetingMs(run.start),
+        endMs: Math.max(this.toMeetingMs(run.start) + 1, this.toMeetingMs(run.end)),
         speaker: this.normalizedSpeaker(run.speaker),
         confidence: run.confidence,
       });
